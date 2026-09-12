@@ -1,12 +1,20 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import { WebhooksHelper } from "square";
+import { SquareClient, WebhooksHelper } from "square";
 
 dotenv.config();
 
+const squareClient = new SquareClient({
+  token: process.env.SQUARE_ACCESS_TOKEN,
+});
+
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Temporary B5.1 idempotency store.
+// We will replace this with persistent storage before real eBook delivery.
+const processedEventIds = new Set();
 
 app.use(cors());
 
@@ -29,6 +37,10 @@ app.post(
   express.raw({ type: "application/json" }),
   async (req, res) => {
     try {
+      // --------------------------------------------------
+      // 1. Verify Square webhook signature
+      // --------------------------------------------------
+
       const signature = req.headers["x-square-hmacsha256-signature"];
 
       if (!signature) {
@@ -60,12 +72,123 @@ app.post(
         return res.status(403).send("Invalid Square signature");
       }
 
+      // --------------------------------------------------
+      // 2. Parse Square event
+      // --------------------------------------------------
+
       const event = JSON.parse(requestBody);
 
       console.log("Square webhook received:", {
         eventId: event.event_id,
         type: event.type,
       });
+
+      // --------------------------------------------------
+      // 3. Basic event ID check
+      // --------------------------------------------------
+
+      const eventId = event.event_id;
+
+      if (!eventId) {
+        console.warn("Square webhook has no event ID");
+        return res.status(400).send("Missing event ID");
+      }
+
+      if (processedEventIds.has(eventId)) {
+        console.log("Duplicate Square event ignored:", eventId);
+        return res.sendStatus(200);
+      }
+
+      // --------------------------------------------------
+      // 4. Only process payment events
+      // --------------------------------------------------
+
+      if (
+        event.type !== "payment.created" &&
+        event.type !== "payment.updated"
+      ) {
+        console.log("Ignoring non-payment event:", event.type);
+        return res.sendStatus(200);
+      }
+
+      // --------------------------------------------------
+      // 5. Extract payment ID
+      // --------------------------------------------------
+
+      const paymentId = event.data?.object?.payment?.id;
+
+      if (!paymentId) {
+        console.warn("Square webhook has no payment ID");
+        return res.status(400).send("Missing payment ID");
+      }
+
+      console.log("Retrieving payment from Square:", paymentId);
+
+      // --------------------------------------------------
+      // 6. Retrieve the payment directly from Square
+      // --------------------------------------------------
+
+      const paymentResponse = await squareClient.payments.get({
+        paymentId,
+      });
+
+      console.log("Square payments.get() response received:", {
+        hasPayment: Boolean(paymentResponse?.payment),
+        responseKeys: paymentResponse
+          ? Object.keys(paymentResponse)
+          : [],
+      });
+
+      const payment = paymentResponse?.payment;
+
+      if (!payment) {
+        console.warn("Square payment was not found:", paymentId);
+        return res.status(404).send("Payment not found");
+      }
+
+      // --------------------------------------------------
+      // 7. Verify the actual Square payment
+      // --------------------------------------------------
+
+      console.log("Square payment verified:", {
+        paymentId: payment.id,
+        status: payment.status,
+        locationId: payment.locationId,
+        orderId: payment.orderId,
+      });
+
+      // --------------------------------------------------
+      // 8. Only completed payments can continue
+      // --------------------------------------------------
+
+      if (payment.status !== "COMPLETED") {
+        console.log(
+          `Payment ${payment.id} is not completed. Current status: ${payment.status}`
+        );
+
+        return res.sendStatus(200);
+      }
+
+      // --------------------------------------------------
+      // 9. B5.1 checkpoint
+      // --------------------------------------------------
+
+      console.log(
+        `✅ PAYMENT COMPLETED — ready for B5.2: ${payment.id}`
+      );
+
+      // IMPORTANT:
+      // B5.1 deliberately stops here.
+      //
+      // No customer lookup.
+      // No order processing.
+      // No Resend.
+      // No eBook delivery.
+      //
+      // Persistent idempotency will also be implemented
+      // before real eBook delivery.
+
+      processedEventIds.add(eventId);
 
       return res.sendStatus(200);
     } catch (error) {
@@ -75,6 +198,7 @@ app.post(
   }
 );
 
+// JSON parser for all other routes
 app.use(express.json());
 
 app.listen(PORT, "0.0.0.0", () => {
