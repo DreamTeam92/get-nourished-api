@@ -44,7 +44,7 @@ app.post(
       }
 
       const notificationUrl =
-        `${req.protocol}://${req.get("host")}${req.originalUrl}`;
+        "https://get-nourished-api.onrender.com/api/webhooks/square";
 
       const requestBody = req.body.toString("utf8");
 
