@@ -128,9 +128,24 @@ app.post(
       // 6. Retrieve the payment directly from Square
       // --------------------------------------------------
 
-      const paymentResponse = await squareClient.payments.get({
-        paymentId,
-      });
+      let paymentResponse;
+
+      try {
+        paymentResponse = await squareClient.payments.get({
+          paymentId,
+        });
+      } catch (error) {
+        if (error?.statusCode === 404) {
+          console.warn(
+            "Square payment does not exist. Ignoring event:",
+            paymentId
+          );
+
+          return res.sendStatus(200);
+        }
+
+        throw error;
+      }
 
       console.log("Square payments.get() response received:", {
         hasPayment: Boolean(paymentResponse?.payment),
@@ -142,8 +157,11 @@ app.post(
       const payment = paymentResponse?.payment;
 
       if (!payment) {
-        console.warn("Square payment was not found:", paymentId);
-        return res.status(404).send("Payment not found");
+        console.warn(
+          "Square payment response contained no payment:",
+          paymentId
+        );
+        return res.sendStatus(200);
       }
 
       // --------------------------------------------------
