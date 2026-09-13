@@ -181,6 +181,20 @@ app.post(
         locationId: payment.locationId,
         orderId: payment.orderId,
       });
+      if (payment.orderId) {
+        console.log("Retrieving order from Square:", payment.orderId);
+
+      const orderResponse = await squareClient.orders.get({
+        orderId: payment.orderId,
+      });
+
+      console.log("Square order response received:", {
+      hasOrder: !!orderResponse.order,
+      responseKeys: Object.keys(orderResponse),
+      });
+
+      console.log("Square order:", JSON.stringify(orderResponse.order, null, 2));
+}
 
       // --------------------------------------------------
       // 8. Only completed payments can continue
