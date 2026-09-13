@@ -195,7 +195,25 @@ app.post(
 
       console.log("Square order:", JSON.stringify(orderResponse.order, null, 2));
 }
+     if (payment.customerId) {
+  console.log("Retrieving customer from Square:", payment.customerId);
 
+  const customerResponse = await squareClient.customers.get({
+    customerId: payment.customerId,
+  });
+
+  console.log("Square customer response received:", {
+    hasCustomer: !!customerResponse.customer,
+    responseKeys: Object.keys(customerResponse),
+  });
+
+  console.log(
+    "Square customer:",
+    JSON.stringify(customerResponse.customer, null, 2)
+  );
+} else {
+  console.log("No customer ID on payment — cannot retrieve customer.");
+}
       // --------------------------------------------------
       // 8. Only completed payments can continue
       // --------------------------------------------------
