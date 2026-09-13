@@ -193,7 +193,13 @@ app.post(
       responseKeys: Object.keys(orderResponse),
       });
 
-      console.log("Square order:", JSON.stringify(orderResponse.order, null, 2));
+      console.log(
+  "Square order:",
+  JSON.stringify(
+    orderResponse.order,
+    (_, value) => (typeof value === "bigint" ? value.toString() : value), 2
+  )
+);
 }
      if (payment.customerId) {
   console.log("Retrieving customer from Square:", payment.customerId);
