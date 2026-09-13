@@ -1,12 +1,18 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import { SquareClient, WebhooksHelper } from "square";
+import { SquareClient, SquareEnvironment, WebhooksHelper } from "square";
 
 dotenv.config();
 
+const squareEnvironment =
+  process.env.SQUARE_ENVIRONMENT?.toLowerCase() === "sandbox"
+    ? SquareEnvironment.Sandbox
+    : SquareEnvironment.Production;
+
 const squareClient = new SquareClient({
   token: process.env.SQUARE_ACCESS_TOKEN,
+  environment: squareEnvironment,
 });
 
 const app = express();
@@ -55,8 +61,9 @@ app.post(
         return res.status(500).send("Webhook configuration error");
       }
 
-      const notificationUrl =
-        "https://get-nourished-api.onrender.com/api/webhooks/square";
+     const notificationUrl =
+       process.env.SQUARE_WEBHOOK_NOTIFICATION_URL ||
+       "https://get-nourished-api.onrender.com/api/webhooks/square";
 
       const requestBody = req.body.toString("utf8");
 
