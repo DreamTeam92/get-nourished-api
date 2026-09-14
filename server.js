@@ -2,8 +2,18 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { SquareClient, SquareEnvironment, WebhooksHelper } from "square";
+import pg from "pg";
 
 dotenv.config();
+
+const { Pool } = pg;
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false,
+  },
+});
 
 const squareEnvironment =
   process.env.SQUARE_ENVIRONMENT?.toLowerCase() === "sandbox"
@@ -17,10 +27,6 @@ const squareClient = new SquareClient({
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
-// Temporary B5.1 idempotency store.
-// We will replace this with persistent storage before real eBook delivery.
-const processedEventIds = new Set();
 
 app.use(cors());
 
@@ -101,10 +107,20 @@ app.post(
         return res.status(400).send("Missing event ID");
       }
 
-      if (processedEventIds.has(eventId)) {
+      const insertEvent = await pool.query(
+        `INSERT INTO processed_webhook_events (event_id)
+        VALUES ($1)
+        ON CONFLICT (event_id) DO NOTHING
+        RETURNING event_id`,
+        [eventId]
+      );
+
+      if (insertEvent.rows.length === 0) {
         console.log("Duplicate Square event ignored:", eventId);
         return res.sendStatus(200);
       }
+
+      console.log("Square event accepted for processing:", eventId);
 
       // --------------------------------------------------
       // 4. Only process payment events
@@ -181,27 +197,20 @@ app.post(
         locationId: payment.locationId,
         orderId: payment.orderId,
       });
-      if (payment.orderId) {
-        console.log("Retrieving order from Square:", payment.orderId);
 
-      const orderResponse = await squareClient.orders.get({
-        orderId: payment.orderId,
-      });
+      // --------------------------------------------------
+      // 8. Only completed payments can continue
+      // --------------------------------------------------
 
-      console.log("Square order response received:", {
-      hasOrder: !!orderResponse.order,
-      responseKeys: Object.keys(orderResponse),
-      });
+      if (payment.status !== "COMPLETED") {
+        console.log(
+          `Payment ${payment.id} is not completed. Current status: ${payment.status}`
+        );
 
-      console.log(
-  "Square order:",
-  JSON.stringify(
-    orderResponse.order,
-    (_, value) => (typeof value === "bigint" ? value.toString() : value), 2
-  )
-);
-}
-     if (payment.customerId) {
+        return res.sendStatus(200);
+      }
+
+    if (payment.customerId) {
   console.log("Retrieving customer from Square:", payment.customerId);
 
   const customerResponse = await squareClient.customers.get({
@@ -220,24 +229,13 @@ app.post(
 } else {
   console.log("No customer ID on payment — cannot retrieve customer.");
 }
-      // --------------------------------------------------
-      // 8. Only completed payments can continue
-      // --------------------------------------------------
-
-      if (payment.status !== "COMPLETED") {
-        console.log(
-          `Payment ${payment.id} is not completed. Current status: ${payment.status}`
-        );
-
-        return res.sendStatus(200);
-      }
 
       // --------------------------------------------------
       // 9. B5.1 checkpoint
       // --------------------------------------------------
 
-      console.log(
-        `✅ PAYMENT COMPLETED — ready for B5.2: ${payment.id}`
+  console.log(
+  `     ✅ PAYMENT COMPLETED — ready for fulfillment: ${payment.id}`
       );
 
       // IMPORTANT:
