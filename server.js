@@ -67,9 +67,9 @@ app.post(
         return res.status(500).send("Webhook configuration error");
       }
 
-     const notificationUrl =
-       process.env.SQUARE_WEBHOOK_NOTIFICATION_URL ||
-       "https://get-nourished-api.onrender.com/api/webhooks/square";
+      const notificationUrl =
+        process.env.SQUARE_WEBHOOK_NOTIFICATION_URL ||
+        "https://get-nourished-api.onrender.com/api/webhooks/square";
 
       const requestBody = req.body.toString("utf8");
 
@@ -112,7 +112,7 @@ app.post(
         VALUES ($1)
         ON CONFLICT (event_id) DO NOTHING
         RETURNING event_id`,
-        [eventId]
+        [eventId],
       );
 
       if (insertEvent.rows.length === 0) {
@@ -161,7 +161,7 @@ app.post(
         if (error?.statusCode === 404) {
           console.warn(
             "Square payment does not exist. Ignoring event:",
-            paymentId
+            paymentId,
           );
 
           return res.sendStatus(200);
@@ -172,9 +172,7 @@ app.post(
 
       console.log("Square payments.get() response received:", {
         hasPayment: Boolean(paymentResponse?.payment),
-        responseKeys: paymentResponse
-          ? Object.keys(paymentResponse)
-          : [],
+        responseKeys: paymentResponse ? Object.keys(paymentResponse) : [],
       });
 
       const payment = paymentResponse?.payment;
@@ -182,7 +180,7 @@ app.post(
       if (!payment) {
         console.warn(
           "Square payment response contained no payment:",
-          paymentId
+          paymentId,
         );
         return res.sendStatus(200);
       }
@@ -204,59 +202,110 @@ app.post(
 
       if (payment.status !== "COMPLETED") {
         console.log(
-          `Payment ${payment.id} is not completed. Current status: ${payment.status}`
+          `Payment ${payment.id} is not completed. Current status: ${payment.status}`,
         );
 
         return res.sendStatus(200);
       }
-
-    if (payment.customerId) {
-  console.log("Retrieving customer from Square:", payment.customerId);
-
-  const customerResponse = await squareClient.customers.get({
-    customerId: payment.customerId,
-  });
-
-  console.log("Square customer response received:", {
-    hasCustomer: !!customerResponse.customer,
-    responseKeys: Object.keys(customerResponse),
-  });
-
-  console.log(
-    "Square customer:",
-    JSON.stringify(customerResponse.customer, null, 2)
-  );
-} else {
-  console.log("No customer ID on payment — cannot retrieve customer.");
-}
-
       // --------------------------------------------------
-      // 9. B5.1 checkpoint
+      // 9. Payment-level fulfillment lock
       // --------------------------------------------------
 
-  console.log(
-  `     ✅ PAYMENT COMPLETED — ready for fulfillment: ${payment.id}`
+      const fulfillmentInsert = await pool.query(
+        `INSERT INTO fulfillment_records (
+     payment_id,
+     order_id,
+     customer_id,
+     status
+   )
+   VALUES ($1, $2, $3, 'pending')
+   ON CONFLICT (payment_id) DO NOTHING
+   RETURNING payment_id`,
+        [payment.id, payment.orderId ?? null, payment.customerId ?? null],
       );
 
-      // IMPORTANT:
-      // B5.1 deliberately stops here.
-      //
-      // No customer lookup.
-      // No order processing.
-      // No Resend.
-      // No eBook delivery.
-      //
-      // Persistent idempotency will also be implemented
-      // before real eBook delivery.
+      if (fulfillmentInsert.rows.length === 0) {
+        console.log(
+          `Duplicate payment ignored — fulfillment already exists: ${payment.id}`,
+        );
+        return res.sendStatus(200);
+      }
 
-      processedEventIds.add(eventId);
+      console.log(`🟢 Fulfillment claimed for payment: ${payment.id}`);
+
+      // --------------------------------------------------
+      // 9b. Mark fulfillment as processing
+      // --------------------------------------------------
+
+      await pool.query(
+        `UPDATE fulfillment_records
+   SET
+     status = 'processing',
+     updated_at = NOW()
+   WHERE payment_id = $1
+     AND status = 'pending'`,
+        [payment.id],
+      );
+
+      console.log(`🔵 Fulfillment processing started: ${payment.id}`);
+
+      if (payment.customerId) {
+        try {
+          console.log("Retrieving customer from Square:", payment.customerId);
+
+          const customerResponse = await squareClient.customers.get({
+            customerId: payment.customerId,
+          });
+
+          console.log("Square customer response received:", {
+            hasCustomer: !!customerResponse.customer,
+            responseKeys: Object.keys(customerResponse),
+          });
+
+          console.log(
+            "Square customer:",
+            JSON.stringify(customerResponse.customer, null, 2),
+          );
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+
+          await pool.query(
+            `UPDATE fulfillment_records
+       SET
+         status = 'failed',
+         last_error = $1,
+         updated_at = NOW()
+       WHERE payment_id = $2
+         AND status = 'processing'`,
+            [errorMessage, payment.id],
+          );
+
+          console.error(
+            `🔴 Fulfillment failed for payment ${payment.id}:`,
+            errorMessage,
+          );
+
+          return res.sendStatus(200);
+        }
+      } else {
+        console.log("No customer ID on payment — cannot retrieve customer.");
+      }
+
+      // --------------------------------------------------
+      // 10. B5.3 checkpoint
+      // --------------------------------------------------
+
+      console.log(
+        `     ✅ PAYMENT COMPLETED — ready for fulfillment: ${payment.id}`,
+      );
 
       return res.sendStatus(200);
     } catch (error) {
       console.error("Square webhook processing error:", error);
       return res.status(500).send("Webhook processing error");
     }
-  }
+  },
 );
 
 // JSON parser for all other routes
