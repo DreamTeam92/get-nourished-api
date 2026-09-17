@@ -249,48 +249,130 @@ app.post(
 
       console.log(`🔵 Fulfillment processing started: ${payment.id}`);
 
+      // --------------------------------------------------
+      // 9c. Resolve customer / recipient email
+      // --------------------------------------------------
+
+      let recipientEmail = null;
+
+      // Path 1: Payment -> Customer -> emailAddress
       if (payment.customerId) {
         try {
-          console.log("Retrieving customer from Square:", payment.customerId);
+          console.log(
+            "Retrieving customer from Square:",
+            payment.customerId,
+          );
 
           const customerResponse = await squareClient.customers.get({
             customerId: payment.customerId,
           });
 
+          const customer = customerResponse?.customer;
+
           console.log("Square customer response received:", {
-            hasCustomer: !!customerResponse.customer,
-            responseKeys: Object.keys(customerResponse),
+            hasCustomer: Boolean(customer),
+            hasEmail: Boolean(customer?.emailAddress),
           });
 
-          console.log(
-            "Square customer:",
-            JSON.stringify(customerResponse.customer, null, 2),
-          );
+          if (customer?.emailAddress) {
+            recipientEmail = customer.emailAddress;
+            console.log(
+              "✅ Recipient email resolved from Square Customer:",
+              recipientEmail,
+            );
+          }
         } catch (error) {
-          const errorMessage =
-            error instanceof Error ? error.message : String(error);
-
-          await pool.query(
-            `UPDATE fulfillment_records
-       SET
-         status = 'failed',
-         last_error = $1,
-         updated_at = NOW()
-       WHERE payment_id = $2
-         AND status = 'processing'`,
-            [errorMessage, payment.id],
+          console.warn(
+            `⚠️ Customer lookup failed for payment ${payment.id}:`,
+            error instanceof Error ? error.message : String(error),
           );
-
-          console.error(
-            `🔴 Fulfillment failed for payment ${payment.id}:`,
-            errorMessage,
-          );
-
-          return res.sendStatus(200);
         }
       } else {
-        console.log("No customer ID on payment — cannot retrieve customer.");
+        console.log(
+          "No customer ID on payment — checking Order fulfillment recipient.",
+        );
       }
+
+      // Path 2: Payment -> Order -> Digital fulfillment -> recipient.emailAddress
+      if (!recipientEmail && payment.orderId) {
+        try {
+          console.log(
+            "Retrieving order from Square:",
+            payment.orderId,
+          );
+
+          const orderResponse = await squareClient.orders.get({
+            orderId: payment.orderId,
+          });
+
+          const fulfillments = orderResponse?.order?.fulfillments ?? [];
+
+          for (const fulfillment of fulfillments) {
+            const email = fulfillment?.recipient?.emailAddress;
+
+            if (email) {
+              recipientEmail = email;
+              break;
+            }
+          }
+
+          if (recipientEmail) {
+            console.log(
+              "✅ Recipient email resolved from Order fulfillment:",
+              recipientEmail,
+            );
+          } else {
+            console.log(
+              "No recipient email found on Order fulfillment.",
+            );
+          }
+        } catch (error) {
+          console.warn(
+            `⚠️ Order lookup failed for payment ${payment.id}:`,
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      }
+
+      // --------------------------------------------------
+      // 9d. Save recipient email / safely stop if unavailable
+      // --------------------------------------------------
+
+      if (!recipientEmail) {
+        const errorMessage =
+          "No recipient email could be resolved from Square payment/customer/order.";
+
+        await pool.query(
+          `UPDATE fulfillment_records
+           SET
+             status = 'failed',
+             last_error = $1,
+             updated_at = NOW()
+           WHERE payment_id = $2
+             AND status = 'processing'`,
+          [errorMessage, payment.id],
+        );
+
+        console.warn(
+          `🟠 Fulfillment stopped safely for payment ${payment.id}: ${errorMessage}`,
+        );
+
+        return res.sendStatus(200);
+      }
+
+      await pool.query(
+        `UPDATE fulfillment_records
+         SET
+           recipient_email = $1,
+           updated_at = NOW()
+         WHERE payment_id = $2
+           AND status = 'processing'`,
+        [recipientEmail, payment.id],
+      );
+
+      console.log(
+        `💾 Recipient email saved for payment ${payment.id}`,
+      );
 
       // --------------------------------------------------
       // 10. B5.3 checkpoint
