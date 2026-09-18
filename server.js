@@ -3,8 +3,18 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { SquareClient, SquareEnvironment, WebhooksHelper } from "square";
 import pg from "pg";
+import { S3Client, ListObjectsV2Command } from "@aws-sdk/client-s3";
 
 dotenv.config();
+
+const r2Client = new S3Client({
+  region: "auto",
+  endpoint: process.env.R2_ENDPOINT,
+  credentials: {
+    accessKeyId: process.env.R2_ACCESS_KEY_ID,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+  },
+});
 
 const { Pool } = pg;
 
@@ -42,6 +52,32 @@ app.get("/health", (req, res) => {
     status: "ok",
     service: "get-nourished-api",
   });
+});
+
+app.get("/api/test/r2", async (req, res) => {
+  try {
+    const response = await r2Client.send(
+      new ListObjectsV2Command({
+        Bucket: process.env.R2_BUCKET_NAME,
+        MaxKeys: 10,
+      }),
+    );
+
+    res.json({
+      success: true,
+      storage: "Cloudflare R2",
+      bucket: process.env.R2_BUCKET_NAME,
+      objectCount: response.KeyCount ?? 0,
+      objects: (response.Contents ?? []).map((object) => object.Key),
+    });
+  } catch (error) {
+    console.error("R2 connection test failed:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "R2 connection failed",
+    });
+  }
 });
 
 app.post(
