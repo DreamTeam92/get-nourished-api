@@ -71,22 +71,11 @@ app.get("/api/test/r2", async (req, res) => {
       objects: (response.Contents ?? []).map((object) => object.Key),
     });
   } catch (error) {
-    console.error("R2 connection test failed:", {
-      name: error?.name,
-      code: error?.code,
-      message: error?.message,
-      statusCode: error?.$metadata?.httpStatusCode,
-    });
+    console.error("R2 connection test failed:", error);
 
     res.status(500).json({
       success: false,
       message: "R2 connection failed",
-      error: {
-        name: error?.name,
-        code: error?.code,
-        message: error?.message,
-        statusCode: error?.$metadata?.httpStatusCode,
-      },
     });
   }
 });
