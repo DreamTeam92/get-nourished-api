@@ -3,9 +3,14 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { SquareClient, SquareEnvironment, WebhooksHelper } from "square";
 import pg from "pg";
-import { S3Client, ListObjectsV2Command } from "@aws-sdk/client-s3";
+import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import crypto from "node:crypto";
+import { Resend } from "resend";
 
 dotenv.config();
+
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 const r2Client = new S3Client({
   region: "auto",
@@ -35,7 +40,252 @@ const squareClient = new SquareClient({
   environment: squareEnvironment,
 });
 
+function generateDeliveryToken() {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+function hashDeliveryToken(token) {
+  return crypto
+    .createHash("sha256")
+    .update(token, "utf8")
+    .digest("hex");
+}
+
+async function createSignedDownloadUrl(objectKey) {
+  const command = new GetObjectCommand({
+    Bucket: process.env.R2_BUCKET_NAME,
+    Key: objectKey,
+  });
+
+  return getSignedUrl(r2Client, command, {
+    expiresIn: 900,
+  });
+}
+
+async function createSecureDownloadUrl(token) {
+  const result = await getValidDeliveryToken(token);
+
+  if (!result.valid) {
+    return {
+      success: false,
+      reason: result.reason,
+    };
+  }
+
+  let signedUrl;
+
+  try {
+    signedUrl = await createSignedDownloadUrl(
+      result.delivery.object_key,
+    );
+  } catch (error) {
+    console.error("Secure download signing failed:", error);
+
+    return {
+      success: false,
+      reason: "signing_failed",
+    };
+  }
+
+  const redeemed = await redeemDeliveryToken(result.delivery.id);
+
+  if (!redeemed) {
+    return {
+      success: false,
+      reason: "redeemed",
+    };
+  }
+
+  return {
+    success: true,
+    signedUrl,
+    paymentId: result.delivery.payment_id,
+    expiresAt: result.delivery.expires_at,
+  };
+}
+
+const DELIVERY_TOKEN_TTL_HOURS = 72;
+
+async function createDeliveryToken(paymentId, objectKey) {
+  const token = generateDeliveryToken();
+  const tokenHash = hashDeliveryToken(token);
+
+  const deliveryTokenId = crypto.randomUUID();
+
+  const expiresAt = new Date(
+    Date.now() + DELIVERY_TOKEN_TTL_HOURS * 60 * 60 * 1000,
+  );
+
+  await pool.query(
+    `
+      INSERT INTO delivery_tokens (
+        id,
+        payment_id,
+        object_key,
+        token_hash,
+        expires_at
+      )
+      VALUES ($1, $2, $3, $4, $5)
+    `,
+    [
+      deliveryTokenId,
+      paymentId,
+      objectKey,
+      tokenHash,
+      expiresAt,
+    ],
+  );
+
+  return {
+    id: deliveryTokenId,
+    token,
+    expiresAt,
+  };
+}
+
+
+async function getValidDeliveryToken(token) {
+  const tokenHash = hashDeliveryToken(token);
+
+  const existing = await pool.query(
+    `
+      SELECT
+        id,
+        payment_id,
+        object_key,
+        expires_at,
+        redeemed_at
+      FROM delivery_tokens
+      WHERE token_hash = $1
+      LIMIT 1
+    `,
+    [tokenHash],
+  );
+
+  if (existing.rows.length === 0) {
+    return {
+      valid: false,
+      reason: "invalid",
+    };
+  }
+
+  const delivery = existing.rows[0];
+
+  if (new Date(delivery.expires_at) <= new Date()) {
+    return {
+      valid: false,
+      reason: "expired",
+      delivery,
+    };
+  }
+
+  if (delivery.redeemed_at) {
+    return {
+      valid: false,
+      reason: "redeemed",
+      delivery,
+    };
+  }
+
+  return {
+    valid: true,
+    delivery,
+  };
+}
+
+async function redeemDeliveryToken(deliveryTokenId) {
+  const result = await pool.query(
+    `
+      UPDATE delivery_tokens
+      SET redeemed_at = NOW()
+      WHERE id = $1
+        AND expires_at > NOW()
+        AND redeemed_at IS NULL
+      RETURNING id
+    `,
+    [deliveryTokenId],
+  );
+
+  return result.rows.length > 0;
+}
+
+async function logDeliveryAudit({
+  deliveryTokenId = null,
+  paymentId = null,
+  eventType,
+  success,
+  ipAddress = null,
+  userAgent = null,
+  details = null,
+}) {
+  const auditResult = await pool.query(
+    `
+      INSERT INTO delivery_audit_log (
+        delivery_token_id,
+        payment_id,
+        event_type,
+        success,
+        ip_address,
+        user_agent,
+        details
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `,
+    [
+      deliveryTokenId,
+      paymentId,
+      eventType,
+      success,
+      ipAddress,
+      userAgent,
+      details,
+    ],
+  );
+
+  console.log("AUDIT INSERTED:", auditResult.rowCount);
+}
+
 const app = express();
+
+
+
+
+
+app.get("/api/download", async (req, res) => {
+  try {
+    const token = req.query.token;
+
+    if (typeof token !== "string" || token.length !== 64) {
+      return res.status(400).send("Invalid download link.");
+    }
+
+    const result = await createSecureDownloadUrl(token);
+
+    if (!result.success) {
+      if (result.reason === "expired") {
+        return res.status(410).send("This download link has expired.");
+      }
+
+      if (result.reason === "redeemed") {
+        return res.status(410).send("This download link has already been used.");
+      }
+
+      if (result.reason === "signing_failed") {
+        return res.status(503).send("Download temporarily unavailable. Please try again.");
+      }
+
+      return res.status(404).send("Invalid download link.");
+    }
+
+    return res.redirect(302, result.signedUrl);
+  } catch (error) {
+    console.error("Download request failed:", error);
+
+    return res.status(500).send("Download temporarily unavailable.");
+  }
+});
+
+
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
@@ -52,32 +302,6 @@ app.get("/health", (req, res) => {
     status: "ok",
     service: "get-nourished-api",
   });
-});
-
-app.get("/api/test/r2", async (req, res) => {
-  try {
-    const response = await r2Client.send(
-      new ListObjectsV2Command({
-        Bucket: process.env.R2_BUCKET_NAME,
-        MaxKeys: 10,
-      }),
-    );
-
-    res.json({
-      success: true,
-      storage: "Cloudflare R2",
-      bucket: process.env.R2_BUCKET_NAME,
-      objectCount: response.KeyCount ?? 0,
-      objects: (response.Contents ?? []).map((object) => object.Key),
-    });
-  } catch (error) {
-    console.error("R2 connection test failed:", error);
-
-    res.status(500).json({
-      success: false,
-      message: "R2 connection failed",
-    });
-  }
 });
 
 app.post(
