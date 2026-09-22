@@ -69,6 +69,7 @@ async function createSecureDownloadUrl(token) {
     return {
       success: false,
       reason: result.reason,
+      delivery: result.delivery ?? null,
     };
   }
 
@@ -84,6 +85,7 @@ async function createSecureDownloadUrl(token) {
     return {
       success: false,
       reason: "signing_failed",
+      delivery: result.delivery ?? null,
     };
   }
 
@@ -99,6 +101,7 @@ async function createSecureDownloadUrl(token) {
   return {
     success: true,
     signedUrl,
+    deliveryTokenId: result.delivery.id,
     paymentId: result.delivery.payment_id,
     expiresAt: result.delivery.expires_at,
   };
@@ -218,31 +221,35 @@ async function logDeliveryAudit({
   userAgent = null,
   details = null,
 }) {
-  const auditResult = await pool.query(
-    `
-      INSERT INTO delivery_audit_log (
-        delivery_token_id,
-        payment_id,
-        event_type,
+  try {
+    const auditResult = await pool.query(
+      `
+        INSERT INTO delivery_audit_log (
+          delivery_token_id,
+          payment_id,
+          event_type,
+          success,
+          ip_address,
+          user_agent,
+          details
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `,
+      [
+        deliveryTokenId,
+        paymentId,
+        eventType,
         success,
-        ip_address,
-        user_agent,
-        details
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
-    `,
-    [
-      deliveryTokenId,
-      paymentId,
-      eventType,
-      success,
-      ipAddress,
-      userAgent,
-      details,
-    ],
-  );
+        ipAddress,
+        userAgent,
+        details,
+      ],
+    );
 
-  console.log("AUDIT INSERTED:", auditResult.rowCount);
+    console.log("AUDIT INSERTED:", auditResult.rowCount);
+  } catch (error) {
+    console.error("Download audit logging failed:", error);
+  }
 }
 
 const app = express();
@@ -254,14 +261,46 @@ const app = express();
 app.get("/api/download", async (req, res) => {
   try {
     const token = req.query.token;
+    const ipAddress =
+      req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
+      req.socket.remoteAddress ||
+      null;
+    const userAgent = req.get("user-agent") || null;
 
     if (typeof token !== "string" || token.length !== 64) {
+      void logDeliveryAudit({
+        eventType: "download_invalid_token",
+        success: false,
+        ipAddress,
+        userAgent,
+        details: "Invalid or malformed delivery token.",
+      });
+
       return res.status(400).send("Invalid download link.");
     }
 
     const result = await createSecureDownloadUrl(token);
 
     if (!result.success) {
+      const auditEvent =
+        result.reason === "expired"
+          ? "download_expired_token"
+          : result.reason === "redeemed"
+            ? "download_redeemed_token"
+            : result.reason === "signing_failed"
+              ? "download_signing_failed"
+              : "download_invalid_token";
+
+      void logDeliveryAudit({
+        deliveryTokenId: result.delivery?.id ?? null,
+        paymentId: result.delivery?.payment_id ?? null,
+        eventType: auditEvent,
+        success: false,
+        ipAddress,
+        userAgent,
+        details: `Download rejected: ${result.reason}.`,
+      });
+
       if (result.reason === "expired") {
         return res.status(410).send("This download link has expired.");
       }
@@ -277,9 +316,30 @@ app.get("/api/download", async (req, res) => {
       return res.status(404).send("Invalid download link.");
     }
 
+    void logDeliveryAudit({
+      deliveryTokenId: result.deliveryTokenId,
+      paymentId: result.paymentId,
+      eventType: "download_success",
+      success: true,
+      ipAddress,
+      userAgent,
+      details: "Secure download URL issued.",
+    });
+
     return res.redirect(302, result.signedUrl);
   } catch (error) {
     console.error("Download request failed:", error);
+
+    void logDeliveryAudit({
+      eventType: "download_error",
+      success: false,
+      ipAddress:
+        req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
+        req.socket.remoteAddress ||
+        null,
+      userAgent: req.get("user-agent") || null,
+      details: "Unexpected download request failure.",
+    });
 
     return res.status(500).send("Download temporarily unavailable.");
   }
