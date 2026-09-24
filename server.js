@@ -357,11 +357,24 @@ app.get("/", (req, res) => {
   });
 });
 
-app.get("/health", (req, res) => {
-  res.json({
-    status: "ok",
-    service: "get-nourished-api",
-  });
+app.get("/health", async (req, res) => {
+  try {
+    const result = await pool.query("SELECT 1 AS database_connection");
+
+    res.json({
+      status: "ok",
+      service: "get-nourished-api",
+      database: result.rows[0].database_connection === 1 ? "connected" : "unexpected",
+    });
+  } catch (error) {
+    console.error("Database health check failed:", error);
+
+    res.status(500).json({
+      status: "error",
+      service: "get-nourished-api",
+      database: "disconnected",
+    });
+  }
 });
 
 app.post(
