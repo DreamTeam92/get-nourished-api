@@ -12,6 +12,60 @@ dotenv.config();
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
+const RESEND_FROM_EMAIL = "hello@getnourished.me";
+
+const EBOOK_OBJECT_KEY =
+  "ebooks/5-ingredients-recipe-ebook.pdf";
+
+async function sendEbookDeliveryEmail(recipientEmail, downloadUrl) {
+  const result = await resend.emails.send({
+    from: RESEND_FROM_EMAIL,
+    to: recipientEmail,
+    subject: "Your Get Nourished eBook is ready 🌿",
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 620px; margin: 0 auto; padding: 40px 24px; color: #2f332d;">
+        <h1 style="font-family: Georgia, serif; font-size: 32px; font-weight: normal;">
+          Your eBook is ready.
+        </h1>
+
+        <p style="font-size: 16px; line-height: 1.7;">
+          Thank you for your purchase of the Get Nourished eBook.
+        </p>
+
+        <p style="font-size: 16px; line-height: 1.7;">
+          Your secure download link is ready below.
+        </p>
+
+        <p style="margin: 32px 0;">
+          <a
+            href="${downloadUrl}"
+            style="display: inline-block; padding: 14px 24px; background: #2f332d; color: #ffffff; text-decoration: none; font-size: 14px;"
+          >
+            DOWNLOAD YOUR EBOOK
+          </a>
+        </p>
+
+        <p style="font-size: 13px; line-height: 1.6; color: #666666;">
+          This secure download link is valid for 72 hours.
+        </p>
+
+        <p style="font-size: 13px; line-height: 1.6; color: #666666;">
+          With love,<br />
+          Get Nourished
+        </p>
+      </div>
+    `,
+  });
+
+  if (result.error) {
+    throw new Error(
+      `Resend email failed: ${result.error.message}`,
+    );
+  }
+
+  return result;
+}
+
 const r2Client = new S3Client({
   region: "auto",
   endpoint: process.env.R2_ENDPOINT,
@@ -39,6 +93,11 @@ const squareClient = new SquareClient({
   token: process.env.SQUARE_ACCESS_TOKEN,
   environment: squareEnvironment,
 });
+
+const PUBLIC_API_BASE_URL =
+  squareEnvironment === SquareEnvironment.Sandbox
+    ? "https://get-nourished-api-sandbox.onrender.com"
+    : "https://get-nourished-api.onrender.com";
 
 function generateDeliveryToken() {
   return crypto.randomBytes(32).toString("hex");
@@ -596,7 +655,7 @@ app.post(
 
           if (customer?.emailAddress) {
             recipientEmail = customer.emailAddress;
-            console.log(
+      console.log(
               "✅ Recipient email resolved from Square Customer:",
               recipientEmail,
             );
@@ -637,12 +696,12 @@ app.post(
           }
 
           if (recipientEmail) {
-            console.log(
+      console.log(
               "✅ Recipient email resolved from Order fulfillment:",
               recipientEmail,
             );
           } else {
-            console.log(
+      console.log(
               "No recipient email found on Order fulfillment.",
             );
           }
@@ -695,17 +754,87 @@ app.post(
       );
 
       // --------------------------------------------------
-      // 10. B5.3 checkpoint
+      // 10. Create secure delivery token
       // --------------------------------------------------
 
-      console.log(
-        `     ✅ PAYMENT COMPLETED — ready for fulfillment: ${payment.id}`,
+      const delivery = await createDeliveryToken(
+        payment.id,
+        EBOOK_OBJECT_KEY,
       );
 
-      return res.sendStatus(200);
+      const downloadUrl =
+        `${PUBLIC_API_BASE_URL}/api/download?token=${encodeURIComponent(delivery.token)}`;
+
+      console.log(
+        `🎟️ Delivery token created for payment ${payment.id}`,
+      );
+
+      // --------------------------------------------------
+      // 11. Send secure eBook email
+      // --------------------------------------------------
+
+      try {
+        await sendEbookDeliveryEmail(
+          recipientEmail,
+          downloadUrl,
+        );
+
+        await pool.query(
+          `UPDATE fulfillment_records
+           SET
+             status = 'sent',
+             sent_at = NOW(),
+             updated_at = NOW(),
+             last_error = NULL
+           WHERE payment_id = $1
+             AND status = 'processing'`,
+          [payment.id],
+        );
+
+        console.log(
+          `📧 eBook delivery email sent successfully: ${payment.id}`,
+        );
+
+        // --------------------------------------------------
+        // 12. Fulfillment complete
+        // --------------------------------------------------
+
+        console.log(
+          `✅ PAYMENT FULFILLED — eBook delivery complete: ${payment.id}`,
+        );
+
+        return res.sendStatus(200);
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+
+        await pool.query(
+          `UPDATE fulfillment_records
+           SET
+             status = 'failed',
+             last_error = $1,
+             updated_at = NOW()
+           WHERE payment_id = $2
+             AND status = 'processing'`,
+          [errorMessage, payment.id],
+        );
+
+        console.error(
+          `🔴 eBook delivery email failed for payment ${payment.id}:`,
+          errorMessage,
+        );
+
+        return res.sendStatus(200);
+      }
     } catch (error) {
-      console.error("Square webhook processing error:", error);
-      return res.status(500).send("Webhook processing error");
+      console.error(
+        "Square webhook processing error:",
+        error,
+      );
+
+      return res.status(500).send(
+        "Webhook processing error",
+      );
     }
   },
 );
