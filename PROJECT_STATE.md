@@ -728,3 +728,53 @@ CURRENT POSITION
 B5.3 — COMPLETE
 Production DB — COMPLETE
 B5.4 — NEXT
+
+## 21. Development Checkpoint — 2026-09-26
+
+Get Nourished core payment → fulfillment → secure delivery architecture
+has been implemented and inspected.
+
+Verified current code:
+
+- Square payment verification: COMPLETE
+- Fulfillment/idempotency lock: COMPLETE
+- Recipient resolution: COMPLETE
+- Private R2 storage: COMPLETE
+- Delivery token generation/hash/72h expiry: COMPLETE
+- Atomic one-time redemption: COMPLETE
+- R2 signed URL generation: COMPLETE
+- Signing-before-redemption hardening: COMPLETE
+- Download endpoint + audit logging: COMPLETE
+- Resend delivery email integration: IMPLEMENTED
+- Successful email → fulfillment `sent`: IMPLEMENTED
+- Email failure → fulfillment `failed` + `last_error`: IMPLEMENTED
+
+Outstanding:
+
+- Controlled failed-fulfillment recovery/retry
+- Production hardening
+- Full end-to-end payment → email → eBook test
+- Temporary test endpoint cleanup/lockdown
+- Final launch checklist
+
+### Temporary project pause
+
+The Get Nourished project is intentionally paused at this checkpoint
+while a short, separate Smoke & Mirrors website concept/demo is explored.
+
+No Get Nourished code changes should be made during the demo unless
+the project is explicitly resumed.
+
+### Retry design under consideration
+
+Current proposed recovery state machine:
+
+`FAILED → controlled retry → PROCESSING → SENT or FAILED`
+
+Proposed token strategy:
+
+- Reuse a valid, unused token when appropriate.
+- Otherwise create a fresh 72-hour token.
+- Retry must be authenticated/controlled.
+
+The retry mechanism has NOT yet been implemented.
